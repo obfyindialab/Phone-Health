@@ -1,29 +1,33 @@
-name: Build Android APK
+name: Build Debug APK
 
 on:
   push:
     branches: [ main, master ]
+    paths-ignore:
+      - '**.md'
+      - '.gitignore'
   pull_request:
     branches: [ main, master ]
   workflow_dispatch:
     inputs:
-      build_type:
-        description: 'Build Type (debug, release, or all)'
+      run_tests:
+        description: 'Run unit tests before building APK'
         required: true
-        default: 'debug'
-        type: choice
-        options:
-          - debug
-          - release
-          - all
+        type: boolean
+        default: true
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  build:
-    name: Build APK
+  build-debug:
+    name: Assemble Debug APK
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
-      - name: Checkout repository
+      - name: Checkout Source Code
         uses: actions/checkout@v4
 
       - name: Set up JDK 21
@@ -36,52 +40,48 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Grant execute permission for gradlew
+      - name: Make Gradle Wrapper Executable
         run: chmod +x gradlew
 
-      - name: Prepare environment and keystore
+      - name: Prepare Secrets and Keystore
         run: |
-          # Ensure .env file exists for Secrets Gradle Plugin
+          # Create .env from template if not present for Secrets Gradle Plugin
           if [ ! -f .env ] && [ -f .env.example ]; then
             cp .env.example .env
+            echo "Created .env from .env.example"
           fi
 
-          # Decode debug keystore if present as base64
+          # Decode base64 debug keystore if present
           if [ ! -f debug.keystore ] && [ -f debug.keystore.base64 ]; then
             base64 -d debug.keystore.base64 > debug.keystore
-          fi
-
-          # Prepare release keystore if provided in GitHub Secrets
-          if [ -n "${{ secrets.RELEASE_KEYSTORE_BASE64 }}" ]; then
-            echo "${{ secrets.RELEASE_KEYSTORE_BASE64 }}" | base64 -d > release.keystore
-            echo "KEYSTORE_PATH=$GITHUB_WORKSPACE/release.keystore" >> $GITHUB_ENV
-            echo "STORE_PASSWORD=${{ secrets.RELEASE_STORE_PASSWORD }}" >> $GITHUB_ENV
-            echo "KEY_PASSWORD=${{ secrets.RELEASE_KEY_PASSWORD }}" >> $GITHUB_ENV
+            echo "Decoded debug.keystore from debug.keystore.base64"
           fi
 
       - name: Run Unit Tests
-        run: ./gradlew testDebugUnitTest
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_tests }}
+        run: ./gradlew testDebugUnitTest --no-daemon
 
       - name: Build Debug APK
-        if: ${{ github.event.inputs.build_type == 'debug' || github.event.inputs.build_type == 'all' || github.event_name != 'workflow_dispatch' }}
-        run: ./gradlew assembleDebug
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
 
-      - name: Build Release APK
-        if: ${{ (github.event.inputs.build_type == 'release' || github.event.inputs.build_type == 'all') && env.KEYSTORE_PATH != '' }}
-        run: ./gradlew assembleRelease
+      - name: Inspect Generated APK
+        run: |
+          echo "=== Debug APK Build Information ==="
+          ls -lh app/build/outputs/apk/debug/
+          APK_PATH=$(find app/build/outputs/apk/debug/ -name "*.apk" | head -n 1)
+          if [ -n "$APK_PATH" ]; then
+            echo "Found APK at: $APK_PATH"
+            echo "File size: $(stat -c%s "$APK_PATH") bytes"
+            echo "SHA256: $(sha256sum "$APK_PATH" | awk '{print $1}')"
+          else
+            echo "Error: No APK found in app/build/outputs/apk/debug/"
+            exit 1
+          fi
 
-      - name: Upload Debug APK
-        if: ${{ hashFiles('app/build/outputs/apk/debug/*.apk') != '' }}
+      - name: Upload Debug APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: app-debug-apk
+          name: phone-health-debug-apk
           path: app/build/outputs/apk/debug/*.apk
-          retention-days: 14
-
-      - name: Upload Release APK
-        if: ${{ hashFiles('app/build/outputs/apk/release/*.apk') != '' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: app-release-apk
-          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
           retention-days: 14
